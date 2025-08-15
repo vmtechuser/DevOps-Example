@@ -14,7 +14,7 @@ pipeline {
     // Global tool configuration
     tools {
         maven 'maven-3.5.2'
-        jdk 'java-17-openjdk-amd64'
+        jdk 'OpenJDK-17'
     }
     
     // Environment variables
@@ -162,7 +162,7 @@ pipeline {
         // =====================================
         stage('3️⃣ Test') {
             when {
-                not { params.SKIP_TESTS }
+                expression { !params.SKIP_TESTS }
             }
             steps {
                 script {
