@@ -201,7 +201,7 @@ pipeline {
                     // Publish test results
                     script {
                         try {
-                            publishTestResults testResultsPattern: 'target/surefire-reports/*.xml'
+                            junit 'target/surefire-reports/*.xml'
                             echo "✅ Test results published"
                         } catch (Exception e) {
                             echo "⚠️ Could not publish test results: ${e.getMessage()}"
