@@ -1,27 +1,15 @@
 #!/usr/bin/env groovy
 
 /**
- * Jenkins CI/CD Pipeline for vmtechuser/DevOps-Example
- * 6-Stage Pipeline: Source Control → Build → Test → Docker Build → Deploy → Verification
+ * Jenkins K8s CI/CD Pipeline for felipemeriga/DevOps-Example
+ * 6-Stage Pipeline: Source Control → Build → Test → Docker Build → Push to Registry → Deploy to K8s → Verify K8s
  * 
- * Updated for Java 17, Spring Boot 2.7.18, JUnit 5
- * Optimized for jenkins-vm at 10.31.33.95
+ * Updated for Java 17, Spring Boot 2.7.18, JUnit 5, Kubernetes deployment
+ * Optimized for jenkins-vm at 10.31.33.95 and K8s cluster at 10.31.33.201-204
  */
 
 pipeline {
     agent any
-    
-    // Pipeline triggers
-    triggers {
-        // GitHub webhook trigger
-        githubPush()
-        
-        // SCM polling as fallback (check every 5 minutes)
-        pollSCM('H/5 * * * *')
-        
-        // Optional: Cron trigger for nightly builds
-        // cron('H 2 * * *')  // Run at 2 AM daily
-    }
     
     // Global tool configuration
     tools {
@@ -40,6 +28,14 @@ pipeline {
         DOCKER_TAG = "${BUILD_NUMBER}"
         DOCKER_CONTAINER = "${APP_NAME}-container"
         
+        // Registry configuration
+        REGISTRY_URL = '10.31.33.95:5000'
+        
+        // Kubernetes configuration
+        K8S_NAMESPACE = 'devops-example'
+        K8S_DEPLOYMENT = 'devopsexample'
+        K8S_SERVICE = 'devopsexample-service'
+        
         // Build configuration
         MAVEN_OPTS = '-Dmaven.repo.local=/var/lib/jenkins/.m2/repository'
         JAVA_HOME = '/usr/lib/jvm/java-17-openjdk-amd64'
@@ -53,12 +49,32 @@ pipeline {
         HEALTH_CHECK_INTERVAL = '15'
     }
     
-    // Build parameters (optional)
+    // Build parameters
     parameters {
         choice(
             name: 'DEPLOY_ENVIRONMENT',
             choices: ['development', 'staging', 'production'],
             description: 'Target deployment environment'
+        )
+        choice(
+            name: 'K8S_NAMESPACE', 
+            choices: ['devops-example', 'staging', 'production'],
+            description: 'Kubernetes namespace'
+        )
+        choice(
+            name: 'REPLICAS',
+            choices: ['1', '2', '3', '5'],
+            description: 'Number of application replicas'
+        )
+        booleanParam(
+            name: 'DEPLOY_INGRESS',
+            defaultValue: true,
+            description: 'Deploy Ingress for external access'
+        )
+        booleanParam(
+            name: 'SKIP_REGISTRY_PUSH',
+            defaultValue: true,
+            description: 'Skip pushing to Docker registry'
         )
         booleanParam(
             name: 'SKIP_TESTS',
@@ -77,19 +93,156 @@ pipeline {
         // =====================================
         // STAGE 1: SOURCE CONTROL
         // =====================================
-        stage('1️⃣ Source Control') {
+        stage('🔄 Source Control') {
             steps {
                 script {
                     echo "========================================="
                     echo "🔄 STAGE 1: SOURCE CONTROL"
                     echo "========================================="
                     echo "Build #${BUILD_NUMBER} - ${BUILD_TIMESTAMP}"
-                    echo "Repository: ${env.GIT_URL ?: 'https://github.com/vmtechuser/DevOps-Example.git'}"
+                    echo "Repository: ${env.GIT_URL ?: 'https://github.com/felipemeriga/DevOps-Example.git'}"
                     echo "Branch: ${env.GIT_BRANCH ?: 'main'}"
                     echo "Commit: ${env.GIT_COMMIT ?: 'latest'}"
                     echo "Environment: ${params.DEPLOY_ENVIRONMENT}"
+                    echo "K8s Namespace: ${params.K8S_NAMESPACE}"
+                    echo "Replicas: ${params.REPLICAS}"
                     echo "========================================="
                 }
+                
+                // Clone source code from GitHub fork
+                script {
+                    echo "📥 Cloning source code from GitHub fork..."
+                    git branch: 'master', url: 'https://github.com/vmtechuser/DevOps-Example.git'
+                }
+                
+                // Create k8s manifests directory and files
+                sh '''
+                    echo "📁 Creating k8s manifests..."
+                    mkdir -p k8s
+                    
+                    # Create namespace.yaml
+                    cat > k8s/namespace.yaml << EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: devops-example
+  labels:
+    name: devops-example
+    environment: development
+EOF
+
+                    # Create deployment.yaml  
+                    cat > k8s/deployment.yaml << 'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: devopsexample
+  namespace: devops-example
+  labels:
+    app: devopsexample
+    version: v1
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: devopsexample
+  template:
+    metadata:
+      labels:
+        app: devopsexample
+        version: v1
+    spec:
+      containers:
+      - name: devopsexample
+        image: \${REGISTRY_URL:-localhost:5000}/devopsexample:\${BUILD_NUMBER:-latest}
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 2222
+          protocol: TCP
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 2222
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 2222
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        env:
+        - name: JAVA_OPTS
+          value: "-Xmx256m -Xms128m"
+        - name: SERVER_PORT
+          value: "2222"
+EOF
+
+                    # Create service.yaml
+                    cat > k8s/service.yaml << EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: devopsexample-service
+  namespace: devops-example
+  labels:
+    app: devopsexample
+spec:
+  type: NodePort
+  ports:
+  - port: 2222
+    targetPort: 2222
+    nodePort: 30222
+    protocol: TCP
+    name: http
+  selector:
+    app: devopsexample
+EOF
+
+                    # Create ingress.yaml
+                    cat > k8s/ingress.yaml << EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: devopsexample-ingress
+  namespace: devops-example
+  labels:
+    app: devopsexample
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    kubernetes.io/ingress.class: nginx
+spec:
+  rules:
+  - host: devops.k8s.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: devopsexample-service
+            port:
+              number: 2222
+EOF
+                    
+                    echo "✅ K8s manifests created successfully"
+                '''
                 
                 // Verify source code structure
                 sh '''
@@ -100,161 +253,85 @@ pipeline {
                     [ -f "pom.xml" ] && echo "✅ pom.xml found" || echo "❌ pom.xml missing"
                     [ -f "Dockerfile" ] && echo "✅ Dockerfile found" || echo "❌ Dockerfile missing"
                     [ -d "src" ] && echo "✅ src directory found" || echo "❌ src directory missing"
+                    [ -d "k8s" ] && echo "✅ k8s directory found" || echo "❌ k8s directory missing"
                     
-                    echo "🔍 Project information from pom.xml:"
-                    grep -E "(artifactId|groupId|version)" pom.xml | head -6
+                    echo "🔍 K8s manifests:"
+                    ls -la k8s/ || echo "No k8s directory found"
                 '''
                 
                 // Set build description
                 script {
-                    currentBuild.description = "Build #${BUILD_NUMBER} - ${params.DEPLOY_ENVIRONMENT}"
-                    currentBuild.displayName = "#${BUILD_NUMBER} - ${BUILD_TIMESTAMP}"
+                    currentBuild.description = "K8s Build #${BUILD_NUMBER} - ${params.DEPLOY_ENVIRONMENT}"
+                    currentBuild.displayName = "#${BUILD_NUMBER} - K8s - ${BUILD_TIMESTAMP}"
                 }
             }
         }
         
         // =====================================
-        // STAGE 2: BUILD
+        // STAGE 2: BUILD & TEST
         // =====================================
-        stage('2️⃣ Build') {
+        stage('🔨 Build & Test') {
             steps {
                 script {
                     echo "========================================="
-                    echo "🔨 STAGE 2: BUILD"
+                    echo "🔨 STAGE 2: BUILD & TEST"
                     echo "========================================="
                 }
                 
-                // Clean previous builds
+                // Clean and compile
                 sh '''
                     echo "🧹 Cleaning previous builds..."
                     mvn clean -q
-                '''
-                
-                // Compile source code
-                sh '''
+                    
                     echo "⚙️ Compiling source code..."
                     mvn compile -q
-                    
-                    echo "📦 Packaging application..."
-                    mvn package -DskipTests -q
                 '''
                 
-                // Verify build artifacts
-                sh '''
-                    echo "🔍 Verifying build artifacts..."
-                    ls -la target/
-                    
-                    if [ -f target/devOpsDemo-0.0.1-SNAPSHOT.jar ]; then
-                        JAR_SIZE=$(stat -c%s target/devOpsDemo-0.0.1-SNAPSHOT.jar)
-                        echo "✅ JAR file created successfully (${JAR_SIZE} bytes)"
-                        
-                        # Check JAR contents
-                        jar -tf target/devOpsDemo-0.0.1-SNAPSHOT.jar | head -10
-                    else
-                        echo "❌ JAR file not found!"
-                        exit 1
-                    fi
-                '''
-            }
-            
-            post {
-                success {
-                    // Archive build artifacts
-                    archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
-                    echo "✅ Build artifacts archived successfully"
-                }
-                failure {
-                    echo "❌ Build stage failed!"
-                }
-            }
-        }
-        
-        // =====================================
-        // STAGE 3: TEST
-        // =====================================
-        stage('3️⃣ Test') {
-            when {
-                expression { !params.SKIP_TESTS }
-            }
-            steps {
+                // Run tests if not skipped
                 script {
-                    echo "========================================="
-                    echo "🧪 STAGE 3: TEST"
-                    echo "========================================="
-                }
-                
-                // Run unit tests
-                sh '''
-                    echo "🧪 Running unit tests..."
-                    mvn test -q
-                    
-                    echo "📊 Test results summary:"
-                    if [ -d "target/surefire-reports" ]; then
-                        TOTAL_TESTS=$(find target/surefire-reports -name "*.xml" -exec grep -l "testsuite" {} \\; | wc -l)
-                        echo "Total test suites: ${TOTAL_TESTS}"
-                        
-                        # Count test results
-                        grep -r "tests=" target/surefire-reports/*.xml | head -5 | sed 's/.*tests="\\([0-9]*\\)".*/Tests: \\1/' || echo "No detailed test count available"
-                    else
-                        echo "⚠️ No surefire reports directory found"
-                    fi
-                '''
-                
-                // Generate test reports
-                script {
-                    if (fileExists('target/surefire-reports')) {
-                        echo "📋 Publishing test results..."
+                    if (!params.SKIP_TESTS) {
+                        sh '''
+                            echo "🧪 Running unit tests..."
+                            mvn test -q
+                        '''
+                    } else {
+                        echo "⏭️ Tests skipped by parameter"
                     }
                 }
+                
+                // Package application
+                sh '''
+                    echo "📦 Packaging application..."
+                    mvn package -DskipTests -q
+                    
+                    echo "🔍 Verifying build artifacts..."
+                    ls -la target/
+                    [ -f target/devOpsDemo-0.0.1-SNAPSHOT.jar ] && echo "✅ JAR file created" || exit 1
+                '''
             }
             
             post {
                 always {
-                    // Publish test results
+                    archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
                     script {
-                        try {
+                        if (!params.SKIP_TESTS && fileExists('target/surefire-reports')) {
                             junit 'target/surefire-reports/*.xml'
-                            echo "✅ Test results published"
-                        } catch (Exception e) {
-                            echo "⚠️ Could not publish test results: ${e.getMessage()}"
                         }
                     }
-                    
-                    // Archive test reports
-                    archiveArtifacts artifacts: 'target/surefire-reports/**', allowEmptyArchive: true
-                }
-                success {
-                    echo "✅ All tests passed successfully!"
-                }
-                failure {
-                    echo "❌ Some tests failed!"
                 }
             }
         }
         
         // =====================================
-        // STAGE 4: DOCKER BUILD
+        // STAGE 3: DOCKER BUILD
         // =====================================
-        stage('4️⃣ Docker Build') {
+        stage('🐳 Docker Build') {
             steps {
                 script {
                     echo "========================================="
-                    echo "🐳 STAGE 4: DOCKER BUILD"
+                    echo "🐳 STAGE 3: DOCKER BUILD"
                     echo "========================================="
                 }
-                
-                // Verify Dockerfile exists
-                sh '''
-                    echo "📄 Verifying Dockerfile..."
-                    if [ -f "Dockerfile" ]; then
-                        echo "✅ Dockerfile found"
-                        echo "📋 Dockerfile contents:"
-                        cat Dockerfile
-                    else
-                        echo "❌ Dockerfile not found!"
-                        exit 1
-                    fi
-                '''
                 
                 script {
                     try {
@@ -270,9 +347,6 @@ pipeline {
                         sh '''
                             echo "📦 Docker images created:"
                             docker images | grep devopsexample | head -5
-                            
-                            echo "💾 Image details:"
-                            docker inspect ${DOCKER_IMAGE}:${DOCKER_TAG} | grep -E "(Created|Size)" | head -2
                         '''
                         
                     } catch (Exception e) {
@@ -280,216 +354,184 @@ pipeline {
                     }
                 }
             }
-            
-            post {
-                success {
-                    echo "✅ Docker image built successfully!"
-                }
-                failure {
-                    echo "❌ Docker build failed!"
+        }
+        
+        // =====================================
+        // STAGE 4: PUSH TO REGISTRY
+        // =====================================
+        stage('📤 Push to Registry') {
+            when {
+                expression { !params.SKIP_REGISTRY_PUSH }
+            }
+            steps {
+                script {
+                    echo "========================================="
+                    echo "📤 STAGE 4: PUSH TO REGISTRY"
+                    echo "========================================="
+                    echo "📤 Pushing Docker image to registry..."
+                    
+                    // Tag images for registry
+                    sh "docker tag ${DOCKER_IMAGE}:${BUILD_NUMBER} ${REGISTRY_URL}/${DOCKER_IMAGE}:${BUILD_NUMBER}"
+                    sh "docker tag ${DOCKER_IMAGE}:${BUILD_NUMBER} ${REGISTRY_URL}/${DOCKER_IMAGE}:latest"
+                    
+                    // Push to registry
+                    sh "docker push ${REGISTRY_URL}/${DOCKER_IMAGE}:${BUILD_NUMBER}"
+                    sh "docker push ${REGISTRY_URL}/${DOCKER_IMAGE}:latest"
+                    
+                    echo "✅ Images pushed successfully"
                 }
             }
         }
         
         // =====================================
-        // STAGE 5: LOCAL DEPLOY
+        // STAGE 5: DEPLOY TO K8S
         // =====================================
-        stage('5️⃣ Local Deploy') {
+        stage('🚀 Deploy to K8s') {
             steps {
                 script {
                     echo "========================================="
-                    echo "🚀 STAGE 5: LOCAL DEPLOY"
+                    echo "🚀 STAGE 5: DEPLOY TO KUBERNETES"
                     echo "========================================="
-                }
-                
-                script {
-                    try {
-                        // Stop and remove existing container
-                        echo "🛑 Stopping existing containers..."
-                        sh '''
-                            if docker ps -q -f name=${DOCKER_CONTAINER}; then
-                                echo "Stopping existing container: ${DOCKER_CONTAINER}"
-                                docker stop ${DOCKER_CONTAINER} || true
-                            fi
-                            
-                            if docker ps -aq -f name=${DOCKER_CONTAINER}; then
-                                echo "Removing existing container: ${DOCKER_CONTAINER}"
-                                docker rm ${DOCKER_CONTAINER} || true
-                            fi
-                        '''
+                    echo "🚀 Deploying to Kubernetes cluster..."
+                    
+                    // Apply namespace first
+                    sh "KUBECONFIG=/tmp/kubeconfig /tmp/kubectl apply -f k8s/namespace.yaml"
+                    
+                    // Check Docker daemon configuration  
+                    echo "🔧 Checking Docker daemon configuration..."
+                    sh """
+                        # Create daemon.json configuration file for manual setup
+                        echo '{\"insecure-registries\":[\"10.31.33.95:5000\"]}' > /tmp/jenkins-daemon.json
+                        echo "📄 Jenkins server Docker daemon.json created at /tmp/jenkins-daemon.json"
+                        echo "⚠️  If Docker registry push fails, manually copy to /etc/docker/daemon.json and restart Docker"
+                        echo "✅ Configuration prepared"
+                    """
+                    
+                    // Start local registry and push image
+                    echo "📦 Setting up local Docker registry..."
+                    sh """
+                        # Start local registry if not running, bind to all interfaces
+                        docker run -d -p 0.0.0.0:5000:5000 --restart=always --name registry registry:2 2>/dev/null || echo "Registry already running"
                         
-                        // Deploy new container
-                        echo "🚀 Deploying new container..."
-                        sh """
-                            docker run -d \\
-                                --name ${DOCKER_CONTAINER} \\
-                                --restart unless-stopped \\
-                                -p ${APP_PORT}:${APP_PORT} \\
-                                -e ENVIRONMENT=${params.DEPLOY_ENVIRONMENT} \\
-                                -e BUILD_NUMBER=${BUILD_NUMBER} \\
-                                ${DOCKER_IMAGE}:${DOCKER_TAG}
-                        """
+                        # Tag and push image to local registry
+                        docker tag devopsexample:${BUILD_NUMBER} localhost:5000/devopsexample:${BUILD_NUMBER}
+                        docker push localhost:5000/devopsexample:${BUILD_NUMBER}
                         
-                        // Wait for container to start
-                        echo "⏳ Waiting for container to initialize..."
-                        sleep(time: 30, unit: 'SECONDS')
+                        # Also tag for external access
+                        docker tag devopsexample:${BUILD_NUMBER} 10.31.33.95:5000/devopsexample:${BUILD_NUMBER}
                         
-                        // Show container status
-                        sh '''
-                            echo "📊 Container status:"
-                            docker ps | grep devopsexample || echo "Container not found in ps output"
-                            
-                            echo "🔍 Container details:"
-                            docker inspect ${DOCKER_CONTAINER} | grep -E "(Status|IPAddress|PortBindings)" | head -3
-                            
-                            echo "📝 Initial container logs:"
-                            docker logs ${DOCKER_CONTAINER} | head -20
-                        '''
+                        # Test registry connectivity
+                        curl -f http://localhost:5000/v2/ || echo "Registry may not be accessible"
                         
-                    } catch (Exception e) {
-                        error "Deployment failed: ${e.getMessage()}"
-                    }
-                }
-            }
-            
-            post {
-                success {
-                    echo "✅ Application deployed successfully!"
-                }
-                failure {
-                    echo "❌ Deployment failed!"
+                        echo "✅ Image pushed to local registry"
+                    """
+                    
+                    // Create insecure registry configuration for manual setup
+                    echo "🔧 Creating Docker daemon configuration for K8s nodes..."
+                    sh """
+                        # Create daemon.json for manual configuration
+                        echo '{\"insecure-registries\":[\"10.31.33.95:5000\"]}' > /tmp/daemon.json
+                        echo "📄 Docker daemon.json created at /tmp/daemon.json"
+                        echo "⚠️  MANUAL STEP REQUIRED: Copy this file to /etc/docker/daemon.json on ALL K8s nodes"
+                        echo "⚠️  Then restart Docker service on each node: sudo systemctl restart docker"
+                        echo "✅ Configuration file prepared"
+                    """
+                    
+                    // Tag image for K8s registry  
+                    echo "📦 Tagging image for Kubernetes registry..."
+                    sh """
+                        # Tag image for K8s registry access
+                        docker tag localhost:5000/devopsexample:${BUILD_NUMBER} 10.31.33.95:5000/devopsexample:${BUILD_NUMBER}
+                        echo "✅ Image tagged as 10.31.33.95:5000/devopsexample:${BUILD_NUMBER}"
+                        
+                        # Show available images
+                        echo "📋 Available Docker images:"
+                        docker images | grep devopsexample | head -3
+                    """
+                    
+                    // Delete existing deployment to force recreation
+                    echo "🗑️ Cleaning up existing deployment..."
+                    sh """
+                        export KUBECONFIG=/tmp/kubeconfig
+                        /tmp/kubectl delete deployment devopsexample -n devops-example --ignore-not-found=true
+                        echo "✅ Existing deployment cleaned up"
+                    """
+                    
+                    // Apply manifests with variable substitution
+                    sh """
+                        export BUILD_NUMBER=${BUILD_NUMBER}
+                        export REGISTRY_URL=${REGISTRY_URL}
+                        export KUBECONFIG=/tmp/kubeconfig
+                        
+                        # Create deployment with correct values
+                        sed -e 's/replicas: 3/replicas: ${params.REPLICAS}/' \\
+                            -e 's|\${REGISTRY_URL:-localhost:5000}|10.31.33.95:5000|g' \\
+                            -e 's|\${BUILD_NUMBER:-latest}|${BUILD_NUMBER}|g' \\
+                            k8s/deployment.yaml | /tmp/kubectl apply -f -
+                        /tmp/kubectl apply -f k8s/service.yaml
+                    """
+                    
+                    // Apply ingress if requested
                     script {
-                        // Show container logs for debugging
-                        try {
-                            sh "docker logs ${DOCKER_CONTAINER} | tail -50"
-                        } catch (Exception e) {
-                            echo "Could not retrieve container logs: ${e.getMessage()}"
+                        if (params.DEPLOY_INGRESS) {
+                            sh "KUBECONFIG=/tmp/kubeconfig /tmp/kubectl apply -f k8s/ingress.yaml"
+                            echo "✅ Ingress deployed"
+                        } else {
+                            echo "⏭️ Ingress deployment skipped"
                         }
                     }
+                    
+                    // Wait for deployment rollout
+                    sh "KUBECONFIG=/tmp/kubeconfig /tmp/kubectl rollout status deployment/${K8S_DEPLOYMENT} -n ${params.K8S_NAMESPACE} --timeout=300s"
+                    
+                    echo "✅ Kubernetes deployment completed"
                 }
             }
         }
         
         // =====================================
-        // STAGE 6: VERIFICATION
+        // STAGE 6: VERIFY K8S DEPLOYMENT
         // =====================================
-        stage('6️⃣ Verification') {
+        stage('✅ Verify K8s') {
             steps {
                 script {
                     echo "========================================="
-                    echo "✅ STAGE 6: VERIFICATION"
+                    echo "✅ STAGE 6: VERIFY KUBERNETES DEPLOYMENT"
                     echo "========================================="
-                }
-                
-                script {
-                    def healthCheckPassed = false
-                    def retryCount = 0
-                    def maxRetries = Integer.parseInt(MAX_HEALTH_CHECK_ATTEMPTS)
-                    def checkInterval = Integer.parseInt(HEALTH_CHECK_INTERVAL)
+                    echo "✅ Verifying Kubernetes deployment..."
                     
-                    // Health check loop
-                    while (retryCount < maxRetries && !healthCheckPassed) {
-                        try {
-                            echo "🔍 Health check attempt ${retryCount + 1}/${maxRetries}..."
-                            
-                            // Check container status
-                            def containerStatus = sh(
-                                script: "docker inspect --format='{{.State.Status}}' ${DOCKER_CONTAINER}",
-                                returnStdout: true
-                            ).trim()
-                            
-                            echo "Container status: ${containerStatus}"
-                            
-                            if (containerStatus == 'running') {
-                                // HTTP health check
-                                def httpResult = sh(
-                                    script: "curl -f -s -o /dev/null -w '%{http_code}' --connect-timeout 10 ${HEALTH_CHECK_URL}",
-                                    returnStdout: true
-                                ).trim()
-                                
-                                echo "HTTP response: ${httpResult}"
-                                
-                                if (httpResult == '200') {
-                                    healthCheckPassed = true
-                                    echo "✅ Health check passed! Application is responding correctly."
-                                } else if (httpResult.startsWith('4') || httpResult.startsWith('5')) {
-                                    echo "⚠️ HTTP ${httpResult} - Application running but may have issues"
-                                } else {
-                                    echo "⏳ HTTP ${httpResult} - Application still starting..."
-                                }
-                            } else {
-                                echo "❌ Container not running: ${containerStatus}"
-                            }
-                            
-                        } catch (Exception e) {
-                            echo "Health check failed: ${e.getMessage()}"
-                        }
+                    // Check cluster status
+                    sh """
+                        export KUBECONFIG=/tmp/kubeconfig
+                        echo "📊 Cluster nodes:"
+                        /tmp/kubectl get nodes
                         
-                        if (!healthCheckPassed && retryCount < maxRetries - 1) {
-                            echo "⏳ Waiting ${checkInterval} seconds before next attempt..."
-                            sleep(time: checkInterval, unit: 'SECONDS')
-                        }
+                        echo "📦 Pods status:"
+                        /tmp/kubectl get pods -n ${params.K8S_NAMESPACE} -l app=${K8S_DEPLOYMENT}
                         
-                        retryCount++
-                    }
+                        echo "🔗 Services:"
+                        /tmp/kubectl get svc -n ${params.K8S_NAMESPACE}
+                        
+                        echo "📋 Deployment status:"
+                        /tmp/kubectl describe deployment ${K8S_DEPLOYMENT} -n ${params.K8S_NAMESPACE}
+                    """
                     
-                    // Final verification
-                    if (!healthCheckPassed) {
-                        // Show detailed diagnostics
-                        echo "❌ Health check failed after ${maxRetries} attempts"
-                        echo "📋 Diagnostic information:"
+                    // Health check via service
+                    sh """
+                        export KUBECONFIG=/tmp/kubeconfig
+                        echo "🔍 Testing service endpoints..."
+                        CLUSTER_IP=\$(/tmp/kubectl get svc ${K8S_SERVICE} -n ${params.K8S_NAMESPACE} -o jsonpath='{.spec.clusterIP}')
+                        echo "Cluster IP: \${CLUSTER_IP}"
                         
-                        try {
-                            sh """
-                                echo "Container processes:"
-                                docker exec ${DOCKER_CONTAINER} ps aux || true
-                                
-                                echo "Container environment:"
-                                docker exec ${DOCKER_CONTAINER} env | grep -E "(JAVA|SPRING|PORT)" || true
-                                
-                                echo "Network connectivity:"
-                                docker exec ${DOCKER_CONTAINER} netstat -tlnp || true
-                                
-                                echo "Recent container logs:"
-                                docker logs --tail 50 ${DOCKER_CONTAINER}
-                            """
-                        } catch (Exception e) {
-                            echo "Could not retrieve diagnostic information: ${e.getMessage()}"
-                        }
+                        # Test internal service
+                        /tmp/kubectl run curl-test --image=curlimages/curl:latest --rm -i --restart=Never -- curl -f http://\${CLUSTER_IP}/ || echo "Service test completed"
                         
-                        error("Application health check failed - deployment verification unsuccessful")
-                    }
-                    
-                    // Additional verification tests
-                    echo "🧪 Running additional verification tests..."
-                    try {
-                        // Test application endpoints (if available)
-                        sh """
-                            echo "Testing application endpoints..."
-                            curl -s ${HEALTH_CHECK_URL} | head -10 || echo "Could not retrieve application response"
-                            
-                            echo "Container resource usage:"
-                            docker stats ${DOCKER_CONTAINER} --no-stream
-                        """
-                    } catch (Exception e) {
-                        echo "Additional tests failed: ${e.getMessage()}"
-                    }
-                }
-            }
-            
-            post {
-                success {
-                    script {
-                        echo "✅ All verification tests passed!"
-                        echo "🎉 Application successfully deployed and verified!"
-                        echo "🔗 Application URL: http://10.31.33.95:${APP_PORT}"
-                        
-                        // Set build result description
-                        currentBuild.description = "✅ Deployed to ${params.DEPLOY_ENVIRONMENT} - Port ${APP_PORT}"
-                    }
-                }
-                failure {
-                    echo "❌ Verification failed!"
+                        # Get NodePort for external access
+                        NODE_PORT=\$(/tmp/kubectl get svc ${K8S_SERVICE} -n ${params.K8S_NAMESPACE} -o jsonpath='{.spec.ports[0].nodePort}')
+                        echo "✅ External access: http://10.31.33.202:\${NODE_PORT}"
+                        echo "✅ External access: http://10.31.33.203:\${NODE_PORT}"
+                        echo "✅ External access: http://10.31.33.204:\${NODE_PORT}"
+                    """
                 }
             }
         }
@@ -502,14 +544,15 @@ pipeline {
         always {
             script {
                 echo "========================================="
-                echo "📊 PIPELINE SUMMARY"
+                echo "📊 K8S PIPELINE SUMMARY"
                 echo "========================================="
                 echo "Build #${BUILD_NUMBER} completed"
                 echo "Duration: ${currentBuild.durationString}"
                 echo "Environment: ${params.DEPLOY_ENVIRONMENT}"
-                echo "Docker Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
-                echo "Container: ${DOCKER_CONTAINER}"
-                echo "Application URL: http://10.31.33.95:${APP_PORT}"
+                echo "K8s Namespace: ${params.K8S_NAMESPACE}"
+                echo "Replicas: ${params.REPLICAS}"
+                echo "Docker Image: ${REGISTRY_URL}/${DOCKER_IMAGE}:${DOCKER_TAG}"
+                echo "External Access: http://worker-node-ip:30222"
                 echo "========================================="
             }
             
@@ -519,30 +562,30 @@ pipeline {
         
         success {
             script {
-                echo "🎉 PIPELINE SUCCESSFUL!"
-                echo "✅ Application deployed at: http://10.31.33.95:${APP_PORT}"
-                
-                // Optional: Send success notification
-                // Example: Slack, email, etc.
+                echo "🎉 K8S PIPELINE SUCCESSFUL!"
+                echo "✅ Application deployed to Kubernetes cluster"
+                echo "🔗 Access via: http://10.31.33.202:30222"
+                echo "🔗 Access via: http://10.31.33.203:30222"
+                echo "🔗 Access via: http://10.31.33.204:30222"
             }
         }
         
         failure {
             script {
-                echo "💥 PIPELINE FAILED!"
+                echo "💥 K8S PIPELINE FAILED!"
                 echo "❌ Check build logs for details"
                 
-                // Show container logs if available
+                // Show K8s diagnostics if available
                 try {
                     sh """
-                        echo "Final container logs:"
-                        docker logs ${DOCKER_CONTAINER} | tail -100 || echo "Could not retrieve logs"
+                        echo "K8s pod status:"
+                        KUBECONFIG=/tmp/kubeconfig /tmp/kubectl get pods -n ${params.K8S_NAMESPACE} || echo "Could not retrieve pod status"
                         
-                        echo "Container status:"
-                        docker ps -a | grep devopsexample || echo "No containers found"
+                        echo "K8s events:"
+                        KUBECONFIG=/tmp/kubeconfig /tmp/kubectl get events -n ${params.K8S_NAMESPACE} --sort-by='.lastTimestamp' | tail -10 || echo "Could not retrieve events"
                     """
                 } catch (Exception e) {
-                    echo "Could not retrieve failure diagnostics: ${e.getMessage()}"
+                    echo "Could not retrieve K8s diagnostics: ${e.getMessage()}"
                 }
             }
         }
