@@ -11,6 +11,18 @@
 pipeline {
     agent any
     
+    // Pipeline triggers
+    triggers {
+        // GitHub webhook trigger
+        githubPush()
+        
+        // SCM polling as fallback (check every 5 minutes)
+        pollSCM('H/5 * * * *')
+        
+        // Optional: Cron trigger for nightly builds
+        // cron('H 2 * * *')  // Run at 2 AM daily
+    }
+    
     // Global tool configuration
     tools {
         maven 'maven-3.5.2'

@@ -1,29 +1,51 @@
-HELP.md
-/target/
-!.mvn/wrapper/maven-wrapper.jar
+# Sensitive files
+github_token
+*token*
+*secret*
+*password*
+*.pem
+*.key
 
-### STS ###
-.apt_generated
-.classpath
-.factorypath
-.project
-.settings
-.springBeans
-.sts4-cache
+# Large binaries
+kubectl
+*.bin
+*.exe
 
-### IntelliJ IDEA ###
-.idea
-*.iws
-*.iml
-*.ipr
-
-### NetBeans ###
-/nbproject/private/
-/nbbuild/
-/dist/
-/nbdist/
-/.nb-gradle/
-/build/
-
-### VS Code ###
+# Local configuration
+.claude/
 .vscode/
+.idea/
+
+# Documentation files (exclude per request, except README.md)
+*.md
+!README.md
+
+# Temporary files
+*.tmp
+*.log
+*.cache
+.DS_Store
+Thumbs.db
+
+# Build artifacts (if any Java artifacts exist)
+target/
+*.jar
+*.class
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+*.swp
+*.swo
+*~
+
+# Maven/Gradle
+.m2/
+.gradle/
